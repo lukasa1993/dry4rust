@@ -8,11 +8,13 @@ from typing import Any, Iterator, Sequence
 
 from tree_sitter_language_pack import get_parser
 
-LANGUAGE = "rust"
-EXTENSIONS = (".rs",)
-EXCLUDED_DIRS = frozenset((".git", ".hg", ".idea", ".pytest_cache", ".tox", ".venv", ".build", "build", "coverage", "dist", "node_modules", "target", "vendor", "venv", "DerivedData", "Pods"))
-TEST_DIRS = frozenset(("tests",))
-TEST_SUFFIXES = ("_test.rs",)
+LANGUAGE = 'rust'
+PARSER_BY_EXTENSION = {}
+DISPLAY_LANGUAGE = 'Rust'
+EXTENSIONS = ('.rs',)
+EXCLUDED_DIRS = frozenset(('.git', '.hg', '.idea', '.pytest_cache', '.tox', '.venv', '.build', 'build', 'coverage', 'dist', 'node_modules', 'target', 'vendor', 'venv', 'DerivedData', 'Pods'))
+TEST_DIRS = frozenset(('tests',))
+TEST_SUFFIXES = ('_test.rs',)
 COMMENT_TYPES = frozenset({"comment", "line_comment", "block_comment"})
 STRING_TYPES = frozenset({"string_literal", "raw_string_literal", "char_literal", "string", "heredoc_body"})
 NUMBER_TYPES = frozenset({"number_literal", "integer_literal", "float_literal", "integer", "float", "number"})
@@ -53,8 +55,7 @@ class Duplicate:
 
 def _is_test_path(relative: str) -> bool:
     path = Path(relative)
-    lowered_test_dirs = {value.lower() for value in TEST_DIRS}
-    if any(part in TEST_DIRS or part.lower() in lowered_test_dirs for part in path.parts):
+    if any(part in TEST_DIRS or part.lower() in {value.lower() for value in TEST_DIRS} for part in path.parts):
         return True
     return path.name.endswith(TEST_SUFFIXES)
 
@@ -92,12 +93,16 @@ def _line(node: Any) -> int:
 
 
 def _text(node: Any, source: bytes) -> str:
-    return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+    return source[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+
+def parser_for_path(path: Path) -> Any:
+    return get_parser(PARSER_BY_EXTENSION.get(path.suffix.lower(), LANGUAGE))
 
 
 def normalized_tokens(path: Path) -> list[Token]:
     source = path.read_bytes()
-    tree = get_parser(LANGUAGE).parse(source)
+    tree = parser_for_path(path).parse(source)
     if tree.root_node.has_error:
         raise DryError(f"source contains parse errors: {path}")
     output: list[Token] = []
@@ -125,7 +130,7 @@ def normalized_tokens(path: Path) -> list[Token]:
 
 def _hash_window(tokens: Sequence[Token], start: int, size: int) -> str:
     digest = hashlib.sha256()
-    for token in tokens[start:start + size]:
+    for token in tokens[start : start + size]:
         digest.update(token.value.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
@@ -135,22 +140,14 @@ def _overlap(first: Location, second: Location) -> bool:
     return first.file == second.file and not (first.end_token <= second.start_token or second.end_token <= first.start_token)
 
 
-def _extend(first_tokens: Sequence[Token], first_start: int, second_tokens: Sequence[Token], second_start: int, minimum: int) -> tuple[int, int, int]:
+def _extend(a: Sequence[Token], ai: int, b: Sequence[Token], bi: int, minimum: int) -> tuple[int, int, int]:
     left = 0
-    while (
-        first_start - left - 1 >= 0
-        and second_start - left - 1 >= 0
-        and first_tokens[first_start - left - 1].value == second_tokens[second_start - left - 1].value
-    ):
+    while ai - left - 1 >= 0 and bi - left - 1 >= 0 and a[ai - left - 1].value == b[bi - left - 1].value:
         left += 1
     right = minimum
-    while (
-        first_start + right < len(first_tokens)
-        and second_start + right < len(second_tokens)
-        and first_tokens[first_start + right].value == second_tokens[second_start + right].value
-    ):
+    while ai + right < len(a) and bi + right < len(b) and a[ai + right].value == b[bi + right].value:
         right += 1
-    return first_start - left, second_start - left, right + left
+    return ai - left, bi - left, right + left
 
 
 def find_duplicates(
@@ -179,50 +176,27 @@ def find_duplicates(
             continue
         for first_index in range(len(occurrences)):
             first_file, first_start = occurrences[first_index]
-            for second_file, second_start in occurrences[first_index + 1:]:
+            for second_file, second_start in occurrences[first_index + 1 :]:
                 first_tokens = token_map[first_file]
                 second_tokens = token_map[second_file]
-                first_begin, second_begin, size = _extend(first_tokens, first_start, second_tokens, second_start, min_tokens)
-                first = Location(
-                    first_file,
-                    first_tokens[first_begin].line,
-                    first_tokens[first_begin + size - 1].line,
-                    first_begin,
-                    first_begin + size,
-                )
-                second = Location(
-                    second_file,
-                    second_tokens[second_begin].line,
-                    second_tokens[second_begin + size - 1].line,
-                    second_begin,
-                    second_begin + size,
-                )
+                a_start, b_start, size = _extend(first_tokens, first_start, second_tokens, second_start, min_tokens)
+                first = Location(first_file, first_tokens[a_start].line, first_tokens[a_start + size - 1].line, a_start, a_start + size)
+                second = Location(second_file, second_tokens[b_start].line, second_tokens[b_start + size - 1].line, b_start, b_start + size)
                 if _overlap(first, second):
                     continue
                 ordered = sorted((first, second), key=lambda item: (item.file, item.start_token, item.end_token))
                 key = (ordered[0].file, ordered[0].start_token, ordered[1].file, ordered[1].start_token, size)
                 pairs[key] = Duplicate(size, tuple(ordered))
 
-    candidates = sorted(
-        pairs.values(),
-        key=lambda item: (
-            -item.token_count,
-            item.locations[0].file,
-            item.locations[0].start_token,
-            item.locations[1].file,
-            item.locations[1].start_token,
-        ),
-    )
+    candidates = sorted(pairs.values(), key=lambda item: (-item.token_count, item.locations[0].file, item.locations[0].start_token,
+                                                           item.locations[1].file, item.locations[1].start_token))
     selected: list[Duplicate] = []
     for candidate in candidates:
         first, second = candidate.locations[:2]
         contained = False
         for existing in selected:
             old_first, old_second = existing.locations[:2]
-            same_files = (first.file, second.file) == (old_first.file, old_second.file)
-            first_inside = old_first.start_token <= first.start_token and first.end_token <= old_first.end_token
-            second_inside = old_second.start_token <= second.start_token and second.end_token <= old_second.end_token
-            if same_files and first_inside and second_inside:
+            if (first.file, second.file) == (old_first.file, old_second.file) and                        old_first.start_token <= first.start_token and first.end_token <= old_first.end_token and                        old_second.start_token <= second.start_token and second.end_token <= old_second.end_token:
                 contained = True
                 break
         if contained:

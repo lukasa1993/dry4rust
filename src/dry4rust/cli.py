@@ -10,7 +10,7 @@ from .core import DryError, find_duplicates
 
 
 def parser() -> argparse.ArgumentParser:
-    value = argparse.ArgumentParser(description="Find normalized duplicate code in Rust projects.")
+    value = argparse.ArgumentParser(description='Find normalized duplicate code in Rust projects.')
     value.add_argument("filters", nargs="*")
     value.add_argument("--root", type=Path, default=Path("."))
     value.add_argument("--min-tokens", type=int, default=30)
@@ -27,20 +27,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     root = args.root.resolve()
     try:
-        duplicates = find_duplicates(
-            root,
-            args.min_tokens,
-            args.filters,
-            args.max_groups,
-            args.include_tests,
-            args.max_occurrences_per_window,
-        )
+        duplicates = find_duplicates(root, args.min_tokens, args.filters, args.max_groups,
+                                     args.include_tests, args.max_occurrences_per_window)
     except (OSError, ValueError, DryError) as error:
         print(f"dry4rust: {error}", file=sys.stderr)
         return 1
     payload = {
         "schema_version": 1,
-        "tool": "dry4rust",
+        "tool": 'dry4rust',
         "version": __version__,
         "root": root.as_posix(),
         "summary": {"groups": len(duplicates), "min_tokens": args.min_tokens},

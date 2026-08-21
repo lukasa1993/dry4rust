@@ -1,13 +1,9 @@
 # dry4rust
 
-Use this command as the Rust duplication gate in SwarmForge.
+Use `dry4rust` for Rust duplication verification.
 
-## Install
-
-```bash
-python -m pip install --upgrade "git+https://github.com/lukasa1993/dry4rust.git"
-```
-
-## Verify
-
-Read `README.md`, inspect `dry4rust --help`, and run the command from the project root. Keep generated reports under `target/` and do not commit them.
+1. Run `dry4rust --help` before first use.
+2. Start with `--min-tokens 30`.
+3. Use `--fail` for the quality gate.
+4. Treat exit `1` as a parser or execution failure. Do not report it as a clean result.
+5. Treat exit `2` as a duplication failure.

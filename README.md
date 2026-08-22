@@ -1,17 +1,19 @@
 # dry4rust
 
-`dry4rust` finds normalized duplicate code in Rust projects with Tree-sitter tokens. It reports cross-file and non-overlapping same-file duplicates, extends matching windows to maximal blocks, and suppresses contained results.
+Native Rust duplicate-code analysis. The executable validates Rust with `syn`, tokenizes it with the Rust lexer, normalizes identifiers and literals, detects cross-file and non-overlapping same-file duplication, extends maximal blocks, and suppresses contained matches.
+
+## Install
 
 ```bash
-pipx install git+https://github.com/lukasa1993/dry4rust.git
+cargo install --git https://github.com/lukasa1993/dry4rust --force
+```
+
+## Run
+
+```bash
 dry4rust --min-tokens 30 --fail
 ```
 
-Exit status: `0` pass, `1` analysis error, `2` duplicates found when `--fail` is active.
+Exit status: `0` pass, `1` parse/analysis error, `2` duplicates found when `--fail` is active.
 
-## Development
-
-```bash
-python -m pip install -e . pytest
-pytest -q
-```
+No Python, Node, JVM, or other language runtime is required.

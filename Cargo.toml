@@ -1,0 +1,23 @@
+[package]
+name = "dry4rust"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Native normalized duplicate-code analysis for Rust"
+license = "MIT"
+repository = "https://github.com/lukasa1993/dry4rust"
+readme = "README.md"
+keywords = ["rust", "duplication", "dry", "quality"]
+categories = ["development-tools", "command-line-utilities"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rustc_lexer = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full"] }
+thiserror = "2"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

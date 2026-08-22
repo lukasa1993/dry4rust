@@ -635,16 +635,48 @@ mod tests {
     #[test]
     fn candidate_windows_must_match_even_when_hash_bucket_matches() {
         let left = vec![
-            Token { value: "a".into(), line: 1, index: 0 },
-            Token { value: "b".into(), line: 1, index: 1 },
-            Token { value: "c".into(), line: 1, index: 2 },
-            Token { value: "d".into(), line: 1, index: 3 },
+            Token {
+                value: "a".into(),
+                line: 1,
+                index: 0,
+            },
+            Token {
+                value: "b".into(),
+                line: 1,
+                index: 1,
+            },
+            Token {
+                value: "c".into(),
+                line: 1,
+                index: 2,
+            },
+            Token {
+                value: "d".into(),
+                line: 1,
+                index: 3,
+            },
         ];
         let right = vec![
-            Token { value: "a".into(), line: 1, index: 0 },
-            Token { value: "b".into(), line: 1, index: 1 },
-            Token { value: "x".into(), line: 1, index: 2 },
-            Token { value: "d".into(), line: 1, index: 3 },
+            Token {
+                value: "a".into(),
+                line: 1,
+                index: 0,
+            },
+            Token {
+                value: "b".into(),
+                line: 1,
+                index: 1,
+            },
+            Token {
+                value: "x".into(),
+                line: 1,
+                index: 2,
+            },
+            Token {
+                value: "d".into(),
+                line: 1,
+                index: 3,
+            },
         ];
         assert!(!windows_equal(&left, 0, &right, 0, 4));
     }

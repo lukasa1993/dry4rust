@@ -11,7 +11,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::Path;
 use syn::spanned::Spanned;
-use syn::{Attribute, Item};
+use syn::visit::{self, Visit};
+use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, TraitItem};
 
 fn item_attrs(item: &Item) -> &[Attribute] {
     match item {
@@ -34,63 +35,186 @@ fn item_attrs(item: &Item) -> &[Attribute] {
     }
 }
 
-fn item_range(attrs: &[Attribute], item: &impl Spanned) -> Range<usize> {
-    let item_range = item.span().byte_range();
+fn impl_item_attrs(item: &ImplItem) -> &[Attribute] {
+    match item {
+        ImplItem::Const(value) => &value.attrs,
+        ImplItem::Fn(value) => &value.attrs,
+        ImplItem::Type(value) => &value.attrs,
+        ImplItem::Macro(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
+fn trait_item_attrs(item: &TraitItem) -> &[Attribute] {
+    match item {
+        TraitItem::Const(value) => &value.attrs,
+        TraitItem::Fn(value) => &value.attrs,
+        TraitItem::Type(value) => &value.attrs,
+        TraitItem::Macro(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
+fn foreign_item_attrs(item: &ForeignItem) -> &[Attribute] {
+    match item {
+        ForeignItem::Fn(value) => &value.attrs,
+        ForeignItem::Static(value) => &value.attrs,
+        ForeignItem::Type(value) => &value.attrs,
+        ForeignItem::Macro(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
+fn expr_attrs(expr: &Expr) -> &[Attribute] {
+    match expr {
+        Expr::Array(value) => &value.attrs,
+        Expr::Assign(value) => &value.attrs,
+        Expr::Async(value) => &value.attrs,
+        Expr::Await(value) => &value.attrs,
+        Expr::Binary(value) => &value.attrs,
+        Expr::Block(value) => &value.attrs,
+        Expr::Break(value) => &value.attrs,
+        Expr::Call(value) => &value.attrs,
+        Expr::Cast(value) => &value.attrs,
+        Expr::Closure(value) => &value.attrs,
+        Expr::Const(value) => &value.attrs,
+        Expr::Continue(value) => &value.attrs,
+        Expr::Field(value) => &value.attrs,
+        Expr::ForLoop(value) => &value.attrs,
+        Expr::Group(value) => &value.attrs,
+        Expr::If(value) => &value.attrs,
+        Expr::Index(value) => &value.attrs,
+        Expr::Infer(value) => &value.attrs,
+        Expr::Let(value) => &value.attrs,
+        Expr::Lit(value) => &value.attrs,
+        Expr::Loop(value) => &value.attrs,
+        Expr::Macro(value) => &value.attrs,
+        Expr::Match(value) => &value.attrs,
+        Expr::MethodCall(value) => &value.attrs,
+        Expr::Paren(value) => &value.attrs,
+        Expr::Path(value) => &value.attrs,
+        Expr::Range(value) => &value.attrs,
+        Expr::RawAddr(value) => &value.attrs,
+        Expr::Reference(value) => &value.attrs,
+        Expr::Repeat(value) => &value.attrs,
+        Expr::Return(value) => &value.attrs,
+        Expr::Struct(value) => &value.attrs,
+        Expr::Try(value) => &value.attrs,
+        Expr::TryBlock(value) => &value.attrs,
+        Expr::Tuple(value) => &value.attrs,
+        Expr::Unary(value) => &value.attrs,
+        Expr::Unsafe(value) => &value.attrs,
+        Expr::While(value) => &value.attrs,
+        Expr::Yield(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
+fn range_with_attrs(attrs: &[Attribute], node: &impl Spanned) -> Range<usize> {
+    let range = node.span().byte_range();
     let start = attrs
         .first()
         .map(|attribute| attribute.span().byte_range().start)
-        .unwrap_or(item_range.start);
-    start..item_range.end
+        .unwrap_or(range.start);
+    start..range.end
 }
 
-fn collect_inactive_ranges(
-    items: &[Item],
-    cfg: &scope::CfgContext,
-    output: &mut Vec<Range<usize>>,
-) {
-    for item in items {
-        let attrs = item_attrs(item);
-        if !cfg.attrs_active(attrs) {
-            output.push(item_range(attrs, item));
-            continue;
-        }
-        match item {
-            Item::Mod(module) => {
-                if let Some((_, nested)) = &module.content {
-                    collect_inactive_ranges(nested, cfg, output);
-                }
-            }
-            Item::Impl(implementation) => {
-                for member in &implementation.items {
-                    let attrs = match member {
-                        syn::ImplItem::Const(value) => &value.attrs[..],
-                        syn::ImplItem::Fn(value) => &value.attrs[..],
-                        syn::ImplItem::Type(value) => &value.attrs[..],
-                        syn::ImplItem::Macro(value) => &value.attrs[..],
-                        _ => &[],
-                    };
-                    if !cfg.attrs_active(attrs) {
-                        output.push(item_range(attrs, member));
-                    }
-                }
-            }
-            Item::Trait(trait_item) => {
-                for member in &trait_item.items {
-                    let attrs = match member {
-                        syn::TraitItem::Const(value) => &value.attrs[..],
-                        syn::TraitItem::Fn(value) => &value.attrs[..],
-                        syn::TraitItem::Type(value) => &value.attrs[..],
-                        syn::TraitItem::Macro(value) => &value.attrs[..],
-                        _ => &[],
-                    };
-                    if !cfg.attrs_active(attrs) {
-                        output.push(item_range(attrs, member));
-                    }
-                }
-            }
-            _ => {}
+struct InactiveRangeVisitor<'a> {
+    cfg: &'a scope::CfgContext,
+    ranges: Vec<Range<usize>>,
+}
+
+impl InactiveRangeVisitor<'_> {
+    fn inactive(&mut self, attrs: &[Attribute], node: &impl Spanned) -> bool {
+        if self.cfg.attrs_active(attrs) {
+            false
+        } else {
+            self.ranges.push(range_with_attrs(attrs, node));
+            true
         }
     }
+}
+
+impl<'ast> Visit<'ast> for InactiveRangeVisitor<'_> {
+    fn visit_item(&mut self, node: &'ast Item) {
+        if self.inactive(item_attrs(node), node) {
+            return;
+        }
+        visit::visit_item(self, node);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if self.inactive(impl_item_attrs(node), node) {
+            return;
+        }
+        visit::visit_impl_item(self, node);
+    }
+
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        if self.inactive(trait_item_attrs(node), node) {
+            return;
+        }
+        visit::visit_trait_item(self, node);
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast ForeignItem) {
+        if self.inactive(foreign_item_attrs(node), node) {
+            return;
+        }
+        visit::visit_foreign_item(self, node);
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if self.inactive(&node.attrs, node) {
+            return;
+        }
+        visit::visit_local(self, node);
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        if self.inactive(&node.attrs, node) {
+            return;
+        }
+        visit::visit_arm(self, node);
+    }
+
+    fn visit_field(&mut self, node: &'ast syn::Field) {
+        if self.inactive(&node.attrs, node) {
+            return;
+        }
+        visit::visit_field(self, node);
+    }
+
+    fn visit_variant(&mut self, node: &'ast syn::Variant) {
+        if self.inactive(&node.attrs, node) {
+            return;
+        }
+        visit::visit_variant(self, node);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        if self.inactive(&node.attrs, node) {
+            return;
+        }
+        visit::visit_stmt_macro(self, node);
+    }
+
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if self.inactive(expr_attrs(node), node) {
+            return;
+        }
+        visit::visit_expr(self, node);
+    }
+}
+
+fn inactive_ranges(file: &syn::File, cfg: &scope::CfgContext) -> Vec<Range<usize>> {
+    let mut visitor = InactiveRangeVisitor {
+        cfg,
+        ranges: Vec::new(),
+    };
+    visitor.visit_file(file);
+    visitor.ranges.sort_by_key(|range| (range.start, range.end));
+    visitor.ranges
 }
 
 fn is_keyword(text: &str) -> bool {
@@ -173,8 +297,7 @@ fn normalized_active_tokens(active: &scope::ActiveFile) -> Result<Vec<Token>, Er
         path: active.path.clone(),
         source: source_error,
     })?;
-    let mut excluded_ranges = Vec::new();
-    collect_inactive_ranges(&syntax.items, &active.cfg, &mut excluded_ranges);
+    let excluded_ranges = inactive_ranges(&syntax, &active.cfg);
     let shebang = rustc_lexer::strip_shebang(&source).unwrap_or(0);
     let mut offset = shebang;
     let mut line = 1 + source[..shebang]
@@ -243,7 +366,9 @@ fn extend(a: &[Token], ai: usize, b: &[Token], bi: usize, minimum: usize) -> (us
         left += 1;
     }
     let mut right = minimum;
-    while ai + right < a.len() && bi + right < b.len() && a[ai + right].value == b[bi + right].value
+    while ai + right < a.len()
+        && bi + right < b.len()
+        && a[ai + right].value == b[bi + right].value
     {
         right += 1;
     }
@@ -399,53 +524,67 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn inactive_inline_cfg_items_do_not_create_duplicates() {
+    fn project(name: &str) -> tempfile::TempDir {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(
             dir.path().join("Cargo.toml"),
-            "[package]\nname='dry-inline-cfg-fixture'\nversion='0.1.0'\nedition='2021'\nbuild='build.rs'\n",
+            format!("[package]\nname='{name}'\nversion='0.1.0'\nedition='2021'\n"),
         )
         .unwrap();
-        fs::write(
-            dir.path().join("build.rs"),
-            "fn main() { println!(\"cargo::rustc-check-cfg=cfg(tool_probe)\"); println!(\"cargo::rustc-cfg=tool_probe\"); }\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("src/lib.rs"),
-            "pub fn active() -> i32 { 1 }\n#[cfg(not(tool_probe))]\nfn hidden_a(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n#[cfg(not(tool_probe))]\nfn hidden_b(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n",
-        )
-        .unwrap();
-        let duplicates = find_duplicates(dir.path(), 10, 20, 100, false, &[]).unwrap();
-        assert!(duplicates.is_empty());
+        dir
     }
 
     #[test]
-    fn inactive_external_modules_do_not_create_duplicates() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("src")).unwrap();
-        fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname='dry-module-cfg-fixture'\nversion='0.1.0'\nedition='2021'\nbuild='build.rs'\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("build.rs"),
-            "fn main() { println!(\"cargo::rustc-check-cfg=cfg(tool_probe)\"); println!(\"cargo::rustc-cfg=tool_probe\"); }\n",
-        )
-        .unwrap();
+    fn inactive_inline_cfg_items_do_not_create_duplicates() {
+        let dir = project("dry-inline-cfg-fixture");
         fs::write(
             dir.path().join("src/lib.rs"),
-            "pub fn active() -> i32 { 1 }\n#[cfg(not(tool_probe))] mod hidden_a;\n#[cfg(not(tool_probe))] mod hidden_b;\n",
+            "pub fn active() -> i32 { 1 }\n#[cfg(windows)]\nfn hidden_a(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n#[cfg(windows)]\nfn hidden_b(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n",
         )
         .unwrap();
-        let repeated =
-            "pub fn hidden(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n";
-        fs::write(dir.path().join("src/hidden_a.rs"), repeated).unwrap();
-        fs::write(dir.path().join("src/hidden_b.rs"), repeated).unwrap();
         let duplicates = find_duplicates(dir.path(), 10, 20, 100, false, &[]).unwrap();
-        assert!(duplicates.is_empty());
+        if cfg!(not(windows)) {
+            assert!(duplicates.is_empty());
+        }
+    }
+
+    #[test]
+    fn cfg_disabled_local_statements_do_not_create_duplicates() {
+        let dir = project("dry-local-cfg-fixture");
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn first() { #[cfg(windows)] let x = { let a = 1; let b = a + 2; let c = b * 3; c }; }\npub fn second() { #[cfg(windows)] let x = { let a = 1; let b = a + 2; let c = b * 3; c }; }\n",
+        )
+        .unwrap();
+        let duplicates = find_duplicates(dir.path(), 8, 20, 100, false, &[]).unwrap();
+        if cfg!(not(windows)) {
+            assert!(duplicates.is_empty());
+        }
+    }
+
+    #[test]
+    fn cfg_disabled_match_arms_do_not_create_duplicates() {
+        let dir = project("dry-arm-cfg-fixture");
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub fn first(x: i32) -> i32 { match x { #[cfg(windows)] 1 => { let a=1; let b=a+2; b*3 }, _ => 0 } }\npub fn second(x: i32) -> i32 { match x { #[cfg(windows)] 1 => { let a=1; let b=a+2; b*3 }, _ => 0 } }\n",
+        )
+        .unwrap();
+        let duplicates = find_duplicates(dir.path(), 8, 20, 100, false, &[]).unwrap();
+        if cfg!(not(windows)) {
+            assert!(duplicates.is_empty());
+        }
+    }
+
+    #[test]
+    fn active_static_include_participates_in_duplicate_detection() {
+        let dir = project("dry-include-fixture");
+        fs::write(dir.path().join("src/lib.rs"), "include!(\"shared_a.rs\"); include!(\"shared_b.rs\");\n").unwrap();
+        let body = "pub fn repeated(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n";
+        fs::write(dir.path().join("src/shared_a.rs"), body).unwrap();
+        fs::write(dir.path().join("src/shared_b.rs"), body).unwrap();
+        let duplicates = find_duplicates(dir.path(), 10, 20, 100, false, &[]).unwrap();
+        assert!(!duplicates.is_empty());
     }
 }

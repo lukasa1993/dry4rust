@@ -185,6 +185,13 @@ impl<'ast> Visit<'ast> for InactiveRangeVisitor<'_> {
         visit::visit_field(self, node);
     }
 
+    fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+        if self.inactive(&node.attrs, node) {
+            return;
+        }
+        visit::visit_field_value(self, node);
+    }
+
     fn visit_variant(&mut self, node: &'ast syn::Variant) {
         if self.inactive(&node.attrs, node) {
             return;
@@ -366,9 +373,7 @@ fn extend(a: &[Token], ai: usize, b: &[Token], bi: usize, minimum: usize) -> (us
         left += 1;
     }
     let mut right = minimum;
-    while ai + right < a.len()
-        && bi + right < b.len()
-        && a[ai + right].value == b[bi + right].value
+    while ai + right < a.len() && bi + right < b.len() && a[ai + right].value == b[bi + right].value
     {
         right += 1;
     }
@@ -564,24 +569,81 @@ mod tests {
     }
 
     #[test]
-    fn cfg_disabled_match_arms_do_not_create_duplicates() {
+    fn cfg_disabled_match_arms_do_not_change_active_tokens() {
         let dir = project("dry-arm-cfg-fixture");
         fs::write(
             dir.path().join("src/lib.rs"),
-            "pub fn first(x: i32) -> i32 { match x { #[cfg(windows)] 1 => { let a=1; let b=a+2; b*3 }, _ => 0 } }\npub fn second(x: i32) -> i32 { match x { #[cfg(windows)] 1 => { let a=1; let b=a+2; b*3 }, _ => 0 } }\n",
+            "mod baseline; mod with_disabled;\n",
         )
         .unwrap();
-        let duplicates = find_duplicates(dir.path(), 8, 20, 100, false, &[]).unwrap();
-        if cfg!(not(windows)) {
-            assert!(duplicates.is_empty());
-        }
+        fs::write(
+            dir.path().join("src/baseline.rs"),
+            "pub fn choose(x: i32) -> i32 { match x { _ => 0 } }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("src/with_disabled.rs"),
+            "pub fn choose(x: i32) -> i32 { match x { #[cfg(any())] 1 => { let a=1; let b=a+2; b*3 }, _ => 0 } }\n",
+        )
+        .unwrap();
+        let files = scope::discover(dir.path(), false, &[]).unwrap();
+        let values = |name: &str| {
+            let file = files
+                .iter()
+                .find(|file| file.path.file_name().and_then(|value| value.to_str()) == Some(name))
+                .unwrap();
+            normalized_active_tokens(file)
+                .unwrap()
+                .into_iter()
+                .map(|token| token.value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values("baseline.rs"), values("with_disabled.rs"));
+    }
+
+    #[test]
+    fn cfg_disabled_struct_expression_fields_do_not_change_active_tokens() {
+        let dir = project("dry-field-value-cfg-fixture");
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "mod baseline; mod with_disabled;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("src/baseline.rs"),
+            "pub struct S { pub a: i32, } pub fn make() -> S { S { a: 0, } }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("src/with_disabled.rs"),
+            "pub struct S { pub a: i32, #[cfg(any())] pub b: i32 } pub fn make() -> S { S { a: 0, #[cfg(any())] b: { let x=1; let y=x+2; y*3 } } }\n",
+        )
+        .unwrap();
+        let files = scope::discover(dir.path(), false, &[]).unwrap();
+        let values = |name: &str| {
+            let file = files
+                .iter()
+                .find(|file| file.path.file_name().and_then(|value| value.to_str()) == Some(name))
+                .unwrap();
+            normalized_active_tokens(file)
+                .unwrap()
+                .into_iter()
+                .map(|token| token.value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values("baseline.rs"), values("with_disabled.rs"));
     }
 
     #[test]
     fn active_static_include_participates_in_duplicate_detection() {
         let dir = project("dry-include-fixture");
-        fs::write(dir.path().join("src/lib.rs"), "include!(\"shared_a.rs\"); include!(\"shared_b.rs\");\n").unwrap();
-        let body = "pub fn repeated(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n";
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "include!(\"shared_a.rs\"); include!(\"shared_b.rs\");\n",
+        )
+        .unwrap();
+        let body =
+            "pub fn repeated(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n";
         fs::write(dir.path().join("src/shared_a.rs"), body).unwrap();
         fs::write(dir.path().join("src/shared_b.rs"), body).unwrap();
         let duplicates = find_duplicates(dir.path(), 10, 20, 100, false, &[]).unwrap();

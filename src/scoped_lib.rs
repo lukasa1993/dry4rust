@@ -4,15 +4,17 @@ mod scope;
 
 pub use legacy::{discover_files, normalized_tokens, Duplicate, Error, Location, Token, VERSION};
 
+use proc_macro2::TokenStream;
 use rustc_lexer::{LiteralKind, TokenKind};
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use syn::parse::{ParseStream, Parser};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, TraitItem};
+use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, LitStr, TraitItem};
 
 fn item_attrs(item: &Item) -> &[Attribute] {
     match item {
@@ -224,6 +226,16 @@ fn inactive_ranges(file: &syn::File, cfg: &scope::CfgContext) -> Vec<Range<usize
     visitor.ranges
 }
 
+fn inactive_expr_ranges(expr: &Expr, cfg: &scope::CfgContext) -> Vec<Range<usize>> {
+    let mut visitor = InactiveRangeVisitor {
+        cfg,
+        ranges: Vec::new(),
+    };
+    visitor.visit_expr(expr);
+    visitor.ranges.sort_by_key(|range| (range.start, range.end));
+    visitor.ranges
+}
+
 fn is_keyword(text: &str) -> bool {
     matches!(
         text,
@@ -298,14 +310,8 @@ fn normalize_literal(kind: LiteralKind) -> &'static str {
     }
 }
 
-fn normalized_active_tokens(active: &scope::ActiveFile) -> Result<Vec<Token>, Error> {
-    let source = fs::read_to_string(&active.path)?;
-    let syntax = syn::parse_file(&source).map_err(|source_error| Error::Parse {
-        path: active.path.clone(),
-        source: source_error,
-    })?;
-    let excluded_ranges = inactive_ranges(&syntax, &active.cfg);
-    let shebang = rustc_lexer::strip_shebang(&source).unwrap_or(0);
+fn normalized_tokens_from_source(source: &str, excluded_ranges: &[Range<usize>]) -> Vec<Token> {
+    let shebang = rustc_lexer::strip_shebang(source).unwrap_or(0);
     let mut offset = shebang;
     let mut line = 1 + source[..shebang]
         .bytes()
@@ -345,7 +351,116 @@ fn normalized_active_tokens(active: &scope::ActiveFile) -> Result<Vec<Token>, Er
             });
         }
     }
-    Ok(output)
+    output
+}
+
+fn normalized_active_tokens(active: &scope::ActiveFile) -> Result<Vec<Token>, Error> {
+    let source = fs::read_to_string(&active.path)?;
+    let syntax = syn::parse_file(&source).map_err(|source_error| Error::Parse {
+        path: active.path.clone(),
+        source: source_error,
+    })?;
+    let excluded_ranges = inactive_ranges(&syntax, &active.cfg);
+    Ok(normalized_tokens_from_source(&source, &excluded_ranges))
+}
+
+fn include_literal(tokens: TokenStream) -> Option<LitStr> {
+    let parser = |input: ParseStream<'_>| {
+        let literal: LitStr = input.parse()?;
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+        }
+        if !input.is_empty() {
+            return Err(input.error("include! expects one string literal"));
+        }
+        Ok(literal)
+    };
+    parser.parse2(tokens).ok()
+}
+
+fn expression_include_path(node: &syn::ExprMacro, source_dir: &Path) -> Option<PathBuf> {
+    if !node.mac.path.is_ident("include") {
+        return None;
+    }
+    let literal = include_literal(node.mac.tokens.clone())?;
+    let path = PathBuf::from(literal.value());
+    if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+        return None;
+    }
+    Some(if path.is_absolute() {
+        path
+    } else {
+        source_dir.join(path)
+    })
+}
+
+struct ExpressionIncludeVisitor<'a> {
+    source_dir: &'a Path,
+    excluded_ranges: &'a [Range<usize>],
+    paths: Vec<PathBuf>,
+}
+
+impl<'ast> Visit<'ast> for ExpressionIncludeVisitor<'_> {
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        let range = node.span().byte_range();
+        let excluded = self
+            .excluded_ranges
+            .iter()
+            .any(|item| item.start <= range.start && range.end <= item.end);
+        if !excluded {
+            if let Some(path) = expression_include_path(node, self.source_dir) {
+                self.paths.push(path);
+            }
+            visit::visit_expr_macro(self, node);
+        }
+    }
+}
+
+fn expression_includes_from_file(
+    file: &syn::File,
+    path: &Path,
+    cfg: &scope::CfgContext,
+) -> Vec<PathBuf> {
+    let ranges = inactive_ranges(file, cfg);
+    let source_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut visitor = ExpressionIncludeVisitor {
+        source_dir,
+        excluded_ranges: &ranges,
+        paths: Vec::new(),
+    };
+    visitor.visit_file(file);
+    visitor.paths
+}
+
+fn expression_includes_from_expr(
+    expr: &Expr,
+    path: &Path,
+    cfg: &scope::CfgContext,
+) -> Vec<PathBuf> {
+    let ranges = inactive_expr_ranges(expr, cfg);
+    let source_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut visitor = ExpressionIncludeVisitor {
+        source_dir,
+        excluded_ranges: &ranges,
+        paths: Vec::new(),
+    };
+    visitor.visit_expr(expr);
+    visitor.paths
+}
+
+fn normalized_expression_tokens(
+    path: &Path,
+    cfg: &scope::CfgContext,
+) -> Result<(Vec<Token>, Vec<PathBuf>), Error> {
+    let source = fs::read_to_string(path)?;
+    let syntax = syn::parse_str::<Expr>(&source).map_err(|source_error| Error::Parse {
+        path: path.to_path_buf(),
+        source: source_error,
+    })?;
+    let excluded_ranges = inactive_expr_ranges(&syntax, cfg);
+    let tokens = normalized_tokens_from_source(&source, &excluded_ranges);
+    let includes = expression_includes_from_expr(&syntax, path, cfg);
+    Ok((tokens, includes))
 }
 
 fn window_hash(tokens: &[Token], start: usize, size: usize) -> u64 {
@@ -439,7 +554,20 @@ pub fn find_duplicates(
     let files = scope::discover(root, include_tests, filters).map_err(Error::Argument)?;
     let mut names = Vec::new();
     let mut token_sets = Vec::new();
+    let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
     for active in files {
+        let source = fs::read_to_string(&active.path)?;
+        let syntax = syn::parse_file(&source).map_err(|source_error| Error::Parse {
+            path: active.path.clone(),
+            source: source_error,
+        })?;
+        if let Ok(canonical) = active.path.canonicalize() {
+            visited.insert(canonical);
+        }
+        for path in expression_includes_from_file(&syntax, &active.path, &active.cfg) {
+            queue.push_back((path, active.cfg.clone()));
+        }
         names.push(
             active
                 .path
@@ -449,6 +577,24 @@ pub fn find_duplicates(
                 .replace('\\', "/"),
         );
         token_sets.push(normalized_active_tokens(&active)?);
+    }
+    while let Some((path, cfg)) = queue.pop_front() {
+        let canonical = path.canonicalize()?;
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        let (tokens, nested) = normalized_expression_tokens(&canonical, &cfg)?;
+        names.push(
+            canonical
+                .strip_prefix(root)
+                .unwrap_or(&canonical)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+        token_sets.push(tokens);
+        for path in nested {
+            queue.push_back((path, cfg.clone()));
+        }
     }
     let mut windows: HashMap<u64, Vec<(usize, usize)>> = HashMap::new();
     for (file_index, tokens) in token_sets.iter().enumerate() {
@@ -632,6 +778,30 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(values("baseline.rs"), values("with_disabled.rs"));
+    }
+
+    #[test]
+    fn expression_position_includes_participate_in_duplicate_detection() {
+        let dir = project("dry-expression-include-fixture");
+        fs::write(
+            dir.path().join("src/lib.rs"),
+            "pub const FIRST: i32 = include!(\"first.rs\"); pub const SECOND: i32 = include!(\"second.rs\",);\n",
+        )
+        .unwrap();
+        let body = "{ let a = 1; let b = a + 2; if b > 2 { b * 3 } else { b - 1 } }\n";
+        fs::write(dir.path().join("src/first.rs"), body).unwrap();
+        fs::write(dir.path().join("src/second.rs"), body).unwrap();
+        let duplicates = find_duplicates(dir.path(), 10, 20, 100, false, &[]).unwrap();
+        assert!(duplicates.iter().any(|group| {
+            group
+                .locations
+                .iter()
+                .any(|location| location.file.ends_with("first.rs"))
+                && group
+                    .locations
+                    .iter()
+                    .any(|location| location.file.ends_with("second.rs"))
+        }));
     }
 
     #[test]

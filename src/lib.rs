@@ -277,7 +277,8 @@ fn collect_test_only_ranges(items: &[Item], output: &mut Vec<Range<usize>>) {
 fn is_keyword(text: &str) -> bool {
     matches!(
         text,
-        "as" | "break"
+        "_" | "as"
+            | "break"
             | "const"
             | "continue"
             | "crate"
@@ -319,10 +320,15 @@ fn is_keyword(text: &str) -> bool {
             | "box"
             | "do"
             | "final"
+            | "gen"
             | "macro"
+            | "macro_rules"
             | "override"
             | "priv"
+            | "raw"
+            | "safe"
             | "typeof"
+            | "union"
             | "unsized"
             | "virtual"
             | "yield"
@@ -568,6 +574,17 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn current_rust_keywords_are_preserved_by_normalization() {
+        for keyword in ["_", "gen", "macro_rules", "raw", "safe", "union"] {
+            assert!(
+                is_keyword(keyword),
+                "{keyword} must be treated as Rust syntax"
+            );
+        }
+        assert!(!is_keyword("ordinary_identifier"));
+    }
 
     #[test]
     fn token_normalization_ignores_comments_and_values() {

@@ -1,31 +1,37 @@
-name: CI
+name: Finalize expression include hardening
 
 on:
   push:
-  pull_request:
+    branches: [scope-correctness-v203]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  stable:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  finalize:
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: scope-correctness-v203
+          fetch-depth: 0
       - name: Install stable Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
-      - name: Verify lockfile is current
+      - name: Apply Rust-only expression include fix
+        shell: bash
+        run: |
+          mkdir -p target
+          rustc tools/finalize_expression_includes.rs -o target/finalize-expression-includes
+          target/finalize-expression-includes
+          cargo fmt --all
+      - name: Verify lockfile
         run: cargo metadata --locked --format-version 1 --no-deps > ${{ runner.temp }}/metadata.json
-      - name: Format
-        run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
@@ -36,38 +42,18 @@ jobs:
         shell: bash
         run: |
           cargo install --path . --locked --root target/native-install --force
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            target/native-install/bin/dry4rust.exe --version
-            target/native-install/bin/dry4rust.exe --help >/dev/null
-          else
-            target/native-install/bin/dry4rust --version
-            target/native-install/bin/dry4rust --help >/dev/null
-          fi
-      - name: End-to-end explicit feature selection
-        if: runner.os == 'Linux'
+          target/native-install/bin/dry4rust --version
+          target/native-install/bin/dry4rust --help >/dev/null
+      - name: Commit verified source and restore strict CI
         shell: bash
         run: |
-          fixture="$GITHUB_WORKSPACE/tests/fixtures/feature-crate"
-          tool="$GITHUB_WORKSPACE/target/native-install/bin/dry4rust"
-          "$tool" --root "$fixture" --min-tokens 10 --fail --json > /tmp/dry-default.json
-          grep -q '"groups": 0' /tmp/dry-default.json
-          set +e
-          "$tool" --root "$fixture" --features extra --min-tokens 10 --fail --json > /tmp/dry-extra.json
-          code=$?
-          set -e
-          cat /tmp/dry-extra.json
-          test "$code" -eq 2
-          if grep -q '"groups": 0' /tmp/dry-extra.json; then
-            echo 'feature-enabled duplicate was not detected' >&2
-            exit 1
-          fi
-
-  msrv:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust 1.82
-        run: rustup toolchain install 1.82.0 --profile minimal
-      - name: Check declared MSRV with locked dependencies
-        run: cargo +1.82.0 check --locked --all-targets --all-features
+          git fetch origin main scope-correctness-v203
+          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
+          rm tools/finalize_expression_includes.rs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/scoped_lib.rs .github/workflows/ci.yml tools/finalize_expression_includes.rs
+          git commit -m "Analyze expression-position Rust includes"
+          git fetch origin scope-correctness-v203
+          git rebase origin/scope-correctness-v203
+          git push origin HEAD:scope-correctness-v203

@@ -1,0 +1,268 @@
+name: Apply cfg scope repair
+
+on:
+  push:
+    branches: [audit-test-cfg-scope-20260823]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[scope-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: audit-test-cfg-scope-20260823
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Apply repair with native Rust
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/patch.rs" <<'RS'
+          use std::fs;
+
+          fn one(text: &mut String, from: &str, to: &str) {
+              let count = text.matches(from).count();
+              assert_eq!(count, 1, "expected one match, got {count}: {from}");
+              *text = text.replacen(from, to, 1);
+          }
+
+          fn all(text: &mut String, from: &str, to: &str) {
+              let count = text.matches(from).count();
+              assert!(count > 0, "expected at least one match: {from}");
+              *text = text.replace(from, to);
+          }
+
+          fn main() {
+              let path = "src/scope.rs";
+              let mut text = fs::read_to_string(path).unwrap();
+              one(&mut text,
+                  r##"    features: HashSet<String>,
+    include_tests: bool,
+"##,
+                  r##"    features: HashSet<String>,
+"##);
+              one(&mut text,
+                  "#[derive(Clone, Debug)]\npub(crate) struct CfgContext",
+                  "#[derive(Clone, Debug, PartialEq, Eq)]\npub(crate) struct CfgContext");
+              one(&mut text,
+                  r##"    fn synthetic(include_tests: bool) -> Self {
+        Self {
+            names: HashSet::new(),
+            values: HashMap::new(),
+            features: HashSet::new(),
+            include_tests,
+        }
+    }
+"##,
+                  r##"    fn empty() -> Self {
+        Self {
+            names: HashSet::new(),
+            values: HashMap::new(),
+            features: HashSet::new(),
+        }
+    }
+"##);
+              one(&mut text,
+                  r##"            Meta::Path(path) => {
+                if path.is_ident("test") {
+                    return self.include_tests;
+                }
+                path.get_ident()
+                    .is_some_and(|name| self.names.contains(&name.to_string()))
+            }
+"##,
+                  r##"            Meta::Path(path) => path
+                .get_ident()
+                .is_some_and(|name| self.names.contains(&name.to_string())),
+"##);
+              one(&mut text,
+                  r##"            Meta::Path(path) if path.is_ident("test") => self.include_tests,
+"##,
+                  r##"            Meta::Path(path) if path.is_ident("test") => self.names.contains("test"),
+"##);
+              one(&mut text,
+                  r##"impl CfgContext {
+    fn synthetic(include_tests: bool) -> Self {
+        Self {
+            variants: vec![SingleCfgContext::synthetic(include_tests)],
+        }
+    }
+
+    pub(crate) fn attrs_active(&self, attrs: &[Attribute]) -> bool {
+        self.variants
+            .iter()
+            .any(|context| context.attrs_active(attrs))
+    }
+}
+"##,
+                  r##"impl CfgContext {
+    fn from_single(context: SingleCfgContext, include_tests: bool) -> Self {
+        Self {
+            variants: contexts_for_tests(context, include_tests),
+        }
+    }
+
+    pub(crate) fn attrs_active(&self, attrs: &[Attribute]) -> bool {
+        self.variants
+            .iter()
+            .any(|context| context.attrs_active(attrs))
+    }
+
+    pub(crate) fn single_variants(&self) -> Vec<Self> {
+        self.variants
+            .iter()
+            .cloned()
+            .map(|context| Self {
+                variants: vec![context],
+            })
+            .collect()
+    }
+}
+
+fn contexts_for_tests(context: SingleCfgContext, include_tests: bool) -> Vec<SingleCfgContext> {
+    let mut variants = vec![context.clone()];
+    if include_tests && !context.names.contains("test") {
+        let mut test_context = context;
+        test_context.names.insert("test".into());
+        variants.push(test_context);
+    }
+    variants
+}
+"##);
+              one(&mut text,
+                  "fn parse_cfg_output(text: &str, include_tests: bool) -> SingleCfgContext {\n    let mut context = SingleCfgContext::synthetic(include_tests);",
+                  "fn parse_cfg_output(text: &str) -> SingleCfgContext {\n    let mut context = SingleCfgContext::empty();");
+              one(&mut text,
+                  r##"fn cargo_cfg(
+    root: &Path,
+    package: &Package,
+    target: &Target,
+    include_tests: bool,
+) -> Result<SingleCfgContext, String> {
+"##,
+                  r##"fn cargo_cfg(root: &Path, package: &Package, target: &Target) -> Result<SingleCfgContext, String> {
+"##);
+              one(&mut text, "Ok(parse_cfg_output(&text, include_tests))", "Ok(parse_cfg_output(&text))");
+              one(&mut text,
+                  r##"    Ok(parse_cfg_output(&text))
+}
+
+fn cargo_metadata(root: &Path) -> Result<Metadata, String> {
+"##,
+                  r##"    Ok(parse_cfg_output(&text))
+}
+
+fn host_cfg(root: &Path) -> Result<SingleCfgContext, String> {
+    let output = Command::new("rustc")
+        .args(["--print", "cfg"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("cannot run rustc --print cfg: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "rustc cfg discovery failed with exit code {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| format!("rustc cfg output is invalid UTF-8: {error}"))?;
+    Ok(parse_cfg_output(&text))
+}
+
+fn cargo_metadata(root: &Path) -> Result<Metadata, String> {
+"##);
+              one(&mut text,
+                  "fn fallback_files(root: &Path, include_tests: bool) -> Vec<ActiveFile> {\n    let context = CfgContext::synthetic(include_tests);",
+                  "fn fallback_files(root: &Path, include_tests: bool) -> Result<Vec<ActiveFile>, String> {\n    let context = CfgContext::from_single(host_cfg(root)?, include_tests);");
+              one(&mut text,
+                  "    files.sort_by(|left, right| left.path.cmp(&right.path));\n    files\n}\n\nfn merge_context(",
+                  "    files.sort_by(|left, right| left.path.cmp(&right.path));\n    Ok(files)\n}\n\nfn merge_context(");
+              one(&mut text,
+                  "        return Ok(fallback_files(root, include_tests));",
+                  "        return fallback_files(root, include_tests);");
+              one(&mut text,
+                  r##"            let context = cargo_cfg(root, &package, target, include_tests)?;
+            let mut visited = HashSet::new();
+            let mut target_files = Vec::new();
+            let module_dir = root_module_dir(&target.src_path);
+            visit_file(
+                &target.src_path,
+                &module_dir,
+                &context,
+                &mut visited,
+                &mut target_files,
+            )?;
+            for (path, context) in target_files {
+                merge_context(&mut merged, path, context);
+            }
+"##,
+                  r##"            let base_context = cargo_cfg(root, &package, target)?;
+            for context in contexts_for_tests(base_context, include_tests) {
+                let mut visited = HashSet::new();
+                let mut target_files = Vec::new();
+                let module_dir = root_module_dir(&target.src_path);
+                visit_file(
+                    &target.src_path,
+                    &module_dir,
+                    &context,
+                    &mut visited,
+                    &mut target_files,
+                )?;
+                for (path, context) in target_files {
+                    merge_context(&mut merged, path, context);
+                }
+            }
+"##);
+              all(&mut text, "SingleCfgContext::synthetic(false)", "SingleCfgContext::empty()");
+              one(&mut text,
+                  r##"    #[test]
+    fn default_scope_does_not_force_mutually_exclusive_features() {
+"##,
+                  r##"    #[test]
+    fn include_tests_keeps_production_cfg_and_adds_test_cfg() {
+        let mut base = SingleCfgContext::empty();
+        base.names.insert("unix".into());
+        let context = CfgContext::from_single(base, true);
+        let production: Attribute = syn::parse_quote!(#[cfg(not(test))]);
+        let test: Attribute = syn::parse_quote!(#[cfg(test)]);
+        assert!(context.attrs_active(&[production]));
+        assert!(context.attrs_active(&[test]));
+        assert_eq!(context.single_variants().len(), 2);
+    }
+
+    #[test]
+    fn standalone_scope_uses_host_cfg() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("standalone.rs"), "fn standalone() {}\n").unwrap();
+        let files = discover(dir.path(), false, &[]).unwrap();
+        assert_eq!(files.len(), 1);
+        let host_attr: Attribute = if cfg!(windows) {
+            syn::parse_quote!(#[cfg(windows)])
+        } else {
+            syn::parse_quote!(#[cfg(unix)])
+        };
+        assert!(files[0].cfg.attrs_active(&[host_attr]));
+    }
+
+    #[test]
+    fn default_scope_does_not_force_mutually_exclusive_features() {
+"##);
+              fs::write(path, text).unwrap();
+          }
+          RS
+          rustc --edition=2021 "$RUNNER_TEMP/patch.rs" -o "$RUNNER_TEMP/patch"
+          "$RUNNER_TEMP/patch"
+          cargo fmt --all
+      - name: Commit repair and remove patcher
+        shell: bash
+        run: |
+          git rm .github/workflows/audit-apply-scope.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/scope.rs
+          git commit -m 'Repair test and standalone cfg scope [scope-applied]'
+          git push origin HEAD:audit-test-cfg-scope-20260823

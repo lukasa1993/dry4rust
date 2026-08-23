@@ -243,7 +243,8 @@ fn extend(a: &[Token], ai: usize, b: &[Token], bi: usize, minimum: usize) -> (us
         left += 1;
     }
     let mut right = minimum;
-    while ai + right < a.len() && bi + right < b.len() && a[ai + right].value == b[bi + right].value {
+    while ai + right < a.len() && bi + right < b.len() && a[ai + right].value == b[bi + right].value
+    {
         right += 1;
     }
     (ai - left, bi - left, right + left)
@@ -430,7 +431,8 @@ mod tests {
             "pub fn active() -> i32 { 1 }\n#[cfg(not(tool_probe))] mod hidden_a;\n#[cfg(not(tool_probe))] mod hidden_b;\n",
         )
         .unwrap();
-        let repeated = "pub fn hidden(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n";
+        let repeated =
+            "pub fn hidden(x: i32) -> i32 { let y = x + 1; if y > 2 { y * 2 } else { y - 1 } }\n";
         fs::write(dir.path().join("src/hidden_a.rs"), repeated).unwrap();
         fs::write(dir.path().join("src/hidden_b.rs"), repeated).unwrap();
         let duplicates = find_duplicates(dir.path(), 10, 20, 100, false, &[]).unwrap();

@@ -296,6 +296,16 @@ pub fn find_duplicates(
             "group and occurrence limits must be positive".into(),
         ));
     }
+    if !root.join("Cargo.toml").is_file() {
+        return legacy::find_duplicates(
+            root,
+            min_tokens,
+            max_groups,
+            max_occurrences_per_window,
+            include_tests,
+            filters,
+        );
+    }
     let files = scope::discover(root, include_tests, filters).map_err(Error::Argument)?;
     let mut names = Vec::new();
     let mut token_sets = Vec::new();

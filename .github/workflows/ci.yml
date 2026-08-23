@@ -29,6 +29,7 @@ jobs:
       - name: Apply native Rust review fixes
         run: |
           mkdir -p target
+          sed -i 's/pub struct S { pub a: i32 } pub fn make() -> S { S { a: 0 } }/pub struct S { pub a: i32, } pub fn make() -> S { S { a: 0, } }/' tools/finalize_review.rs
           rustc tools/finalize_review.rs -o target/finalize-review
           target/finalize-review
           cargo fmt --all

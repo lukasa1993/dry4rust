@@ -15,6 +15,12 @@ cargo install --git https://github.com/lukasa1993/dry4rust --locked --force
 
 The repository commits `Cargo.lock`. Use `--locked` so installation uses the dependency graph tested by CI.
 
+## Source scope
+
+`dry4rust` asks Cargo for the active compiler `cfg` values of each selected target. It follows active modules, `#[path]` modules, and literal `.rs` files used by `include!`. This includes `include!` in item and expression position, optional trailing commas, and relative or absolute paths. Source that is disabled by platform, feature, field, match-arm, local-statement, or test configuration is excluded before token comparison.
+
+The default feature set is the Cargo default feature set. Use `--features`, `--no-default-features`, or `--all-features` to select another supported configuration.
+
 ## Run
 
 ```bash

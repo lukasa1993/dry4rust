@@ -43,6 +43,24 @@ jobs:
             target/native-install/bin/dry4rust --version
             target/native-install/bin/dry4rust --help >/dev/null
           fi
+      - name: End-to-end explicit feature selection
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          fixture="$GITHUB_WORKSPACE/tests/fixtures/feature-crate"
+          tool="$GITHUB_WORKSPACE/target/native-install/bin/dry4rust"
+          "$tool" --root "$fixture" --min-tokens 10 --fail --json > /tmp/dry-default.json
+          grep -q '"groups": 0' /tmp/dry-default.json
+          set +e
+          "$tool" --root "$fixture" --features extra --min-tokens 10 --fail --json > /tmp/dry-extra.json
+          code=$?
+          set -e
+          cat /tmp/dry-extra.json
+          test "$code" -eq 2
+          if grep -q '"groups": 0' /tmp/dry-extra.json; then
+            echo 'feature-enabled duplicate was not detected' >&2
+            exit 1
+          fi
 
   msrv:
     runs-on: ubuntu-latest
